@@ -182,6 +182,19 @@ class TestRiskClassifierHighRisk:
         assert result.has_cross_join is True
         assert "Presença de CROSS JOIN ou junção cartesiana sem condição ON" in result.reasons
 
+    def test_join_tautological_condition(self) -> None:
+        sql = "SELECT * FROM artist JOIN album ON true"
+        result = analyze_ast_risk(sql)
+        assert result.level == "high"
+        assert result.nivel_risco == "high"
+        assert result.has_cross_join is True
+        assert "Presença de CROSS JOIN ou junção cartesiana sem condição ON" in result.reasons
+
+        sql_numeric = "SELECT * FROM artist JOIN album ON 1=1"
+        result_numeric = analyze_ast_risk(sql_numeric)
+        assert result_numeric.level == "high"
+        assert result_numeric.has_cross_join is True
+
     def test_high_join_complexity(self) -> None:
         sql = (
             "SELECT ar.name "
@@ -287,6 +300,24 @@ class TestRiskClassifierEdgeCases:
         assert result.reasons == []
         assert result.motivos_risco == []
         assert result.sensitive_tables_accessed == ["invoice"]
+
+    def test_cte_where_does_not_scope_to_outer_fact_table(self) -> None:
+        sql = "WITH dummy AS (SELECT 1 WHERE 1=1) SELECT * FROM track"
+        result = analyze_ast_risk(sql)
+        assert result.level == "high"
+        assert result.nivel_risco == "high"
+        assert result.missing_where_on_fact_tables is True
+        assert (
+            "Consulta na tabela de fatos volumosa 'track' sem filtro WHERE e sem agregação"
+            in result.reasons
+        )
+
+    def test_multiple_statements_blocked(self) -> None:
+        sql = "SELECT 1; SELECT * FROM customer;"
+        result = analyze_ast_risk(sql)
+        assert result.level == "high"
+        assert result.nivel_risco == "high"
+        assert "Múltiplos statements SQL não são permitidos por segurança." in result.reasons
 
     def test_type_alias_and_constants(self) -> None:
         assert RiskAssessment is DeterministicRiskResult

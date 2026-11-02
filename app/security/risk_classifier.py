@@ -48,33 +48,71 @@ class DeterministicRiskResult(BaseModel):
 RiskAssessment = DeterministicRiskResult
 
 
+def _extract_direct_tables(sel: exp.Select) -> set[str]:
+    """Extract physical or aliased table names directly referenced in a Select node's FROM and JOINs."""
+    direct_tables: set[str] = set()
+    from_clause = sel.args.get("from_")
+    if from_clause:
+        for t in from_clause.find_all(exp.Table):
+            if t.find_ancestor(exp.Select) is sel:
+                t_name = t.name.strip('"').lower() if t.name else ""
+                if t_name:
+                    direct_tables.add(t_name)
+
+    for j in sel.args.get("joins") or []:
+        for t in j.find_all(exp.Table):
+            if t.find_ancestor(exp.Select) is sel:
+                t_name = t.name.strip('"').lower() if t.name else ""
+                if t_name:
+                    direct_tables.add(t_name)
+
+    return direct_tables
+
+
 def _is_table_exposed_without_aggregation(ast: sqlglot.Expr, table_name: str) -> bool:
     """Check if table_name is exposed without aggregation (GROUP BY or scalar agg)."""
     normalized_target = table_name.strip('"').lower()
 
     for sel in ast.find_all(exp.Select):
-        direct_tables: list[str] = []
-        from_clause = sel.args.get("from_")
-        if from_clause:
-            for t in from_clause.find_all(exp.Table):
-                if t.find_ancestor(exp.Select) is sel:
-                    t_name = t.name.strip('"').lower() if t.name else ""
-                    if t_name:
-                        direct_tables.append(t_name)
-
-        for j in sel.args.get("joins") or []:
-            for t in j.find_all(exp.Table):
-                if t.find_ancestor(exp.Select) is sel:
-                    t_name = t.name.strip('"').lower() if t.name else ""
-                    if t_name:
-                        direct_tables.append(t_name)
-
+        direct_tables = _extract_direct_tables(sel)
         if normalized_target in direct_tables:
             has_group = sel.args.get("group") is not None
             is_scalar = _is_pure_scalar_aggregation(sel)
             if not has_group and not is_scalar:
                 return True
 
+    return False
+
+
+def _is_table_unfiltered_and_unaggregated(ast: sqlglot.Expr, table_name: str) -> bool:
+    """Check if table_name is queried without scoped WHERE and without aggregation."""
+    normalized_target = table_name.strip('"').lower()
+
+    for sel in ast.find_all(exp.Select):
+        direct_tables = _extract_direct_tables(sel)
+        if normalized_target in direct_tables:
+            has_where = sel.args.get("where") is not None
+            has_group = sel.args.get("group") is not None
+            is_scalar = _is_pure_scalar_aggregation(sel)
+            if not has_where and not has_group and not is_scalar:
+                return True
+
+    return False
+
+
+def _is_tautological_condition(node: sqlglot.Expr | None) -> bool:
+    """Check if condition is a constant tautology like TRUE or 1=1."""
+    if node is None:
+        return False
+    inner = node.unnest() if hasattr(node, "unnest") else node
+    if isinstance(inner, exp.Boolean) and inner.this is True:
+        return True
+    if isinstance(inner, exp.EQ):
+        left = inner.left.unnest() if hasattr(inner.left, "unnest") else inner.left
+        right = inner.right.unnest() if hasattr(inner.right, "unnest") else inner.right
+        if isinstance(left, exp.Literal) and isinstance(right, exp.Literal):
+            if str(left.this) == str(right.this):
+                return True
     return False
 
 
@@ -96,7 +134,7 @@ def analyze_ast_risk(sql: str) -> DeterministicRiskResult:
         )
 
     try:
-        ast = sqlglot.parse_one(sql, read="postgres")
+        parsed = [s for s in sqlglot.parse(sql, read="postgres") if s is not None]
     except Exception as exc:
         return DeterministicRiskResult(
             level="high",
@@ -105,7 +143,7 @@ def analyze_ast_risk(sql: str) -> DeterministicRiskResult:
             motivos_risco=[f"Erro de parsing SQL: {exc}"],
         )
 
-    if ast is None:
+    if not parsed:
         return DeterministicRiskResult(
             level="high",
             reasons=["Query SQL vazia ou inválida."],
@@ -113,6 +151,15 @@ def analyze_ast_risk(sql: str) -> DeterministicRiskResult:
             motivos_risco=["Query SQL vazia ou inválida."],
         )
 
+    if len(parsed) > 1:
+        return DeterministicRiskResult(
+            level="high",
+            reasons=["Múltiplos statements SQL não são permitidos por segurança."],
+            nivel_risco="high",
+            motivos_risco=["Múltiplos statements SQL não são permitidos por segurança."],
+        )
+
+    ast = parsed[0]
     reasons: list[str] = []
 
     # 1. Resolve referenced physical tables (excluding CTE aliases)
@@ -145,19 +192,17 @@ def analyze_ast_risk(sql: str) -> DeterministicRiskResult:
     fact_tables_accessed = [t for t in sorted(physical_tables_set) if t in FACT_TABLES]
     missing_where_on_fact_tables = False
     if fact_tables_accessed:
-        has_where = ast.find(exp.Where) is not None
-        if not has_where:
-            unfiltered_unaggregated = [
-                ft for ft in fact_tables_accessed if _is_table_exposed_without_aggregation(ast, ft)
-            ]
-            if unfiltered_unaggregated:
-                missing_where_on_fact_tables = True
-                for ft in unfiltered_unaggregated:
-                    reasons.append(
-                        f"Consulta na tabela de fatos volumosa '{ft}' sem filtro WHERE e sem agregação"
-                    )
+        unfiltered_unaggregated = [
+            ft for ft in fact_tables_accessed if _is_table_unfiltered_and_unaggregated(ast, ft)
+        ]
+        if unfiltered_unaggregated:
+            missing_where_on_fact_tables = True
+            for ft in unfiltered_unaggregated:
+                reasons.append(
+                    f"Consulta na tabela de fatos volumosa '{ft}' sem filtro WHERE e sem agregação"
+                )
 
-    # 4. Join complexity and cartesian joins
+    # 4. Join complexity, cartesian joins, and tautological join conditions
     joins = list(ast.find_all(exp.Join))
     join_count = len(joins)
     if join_count >= 4:
@@ -170,13 +215,17 @@ def analyze_ast_risk(sql: str) -> DeterministicRiskResult:
         if not method and j.args.get("method"):
             method = str(j.args.get("method")).upper()
         is_natural = method == "NATURAL"
-        has_on = j.args.get("on") is not None
+        on_clause = j.args.get("on")
+        has_on = on_clause is not None
         has_using = j.args.get("using") is not None
 
         if kind == "CROSS":
             has_cross_join = True
             break
         if not has_on and not has_using and not is_natural:
+            has_cross_join = True
+            break
+        if has_on and _is_tautological_condition(on_clause):
             has_cross_join = True
             break
 
