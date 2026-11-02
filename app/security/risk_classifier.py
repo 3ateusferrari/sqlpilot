@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+from typing import Self
+
 import sqlglot
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlglot import exp
 
 from app.graph.state import RiskLevel
 from app.security.validator import _is_pure_scalar_aggregation, _resolve_physical_tables
 
 SENSITIVE_TABLES: frozenset[str] = frozenset({"employee", "customer", "invoice"})
-PII_COLUMNS: frozenset[str] = frozenset(
-    {"email", "phone", "fax", "address", "postal_code", "birth_date"}
-)
+PII_COLUMNS: frozenset[str] = frozenset({"email", "phone", "address", "birth_date", "postal_code"})
 FACT_TABLES: frozenset[str] = frozenset({"track", "invoice_line", "playlist_track"})
 
 
@@ -26,6 +26,22 @@ class DeterministicRiskResult(BaseModel):
     join_count: int = 0
     has_cross_join: bool = False
     missing_where_on_fact_tables: bool = False
+    nivel_risco: RiskLevel = "low"
+    motivos_risco: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def sync_portuguese_fields(self) -> Self:
+        """Synchronize English and Portuguese state field names."""
+        if self.level and self.nivel_risco == "low" and self.level != "low":
+            self.nivel_risco = self.level
+        elif self.nivel_risco and self.level == "low" and self.nivel_risco != "low":
+            self.level = self.nivel_risco
+
+        if self.reasons and not self.motivos_risco:
+            self.motivos_risco = list(self.reasons)
+        elif self.motivos_risco and not self.reasons:
+            self.reasons = list(self.motivos_risco)
+        return self
 
 
 # Alias for compatibility
@@ -75,6 +91,8 @@ def analyze_ast_risk(sql: str) -> DeterministicRiskResult:
         return DeterministicRiskResult(
             level="high",
             reasons=["Query SQL vazia ou inválida."],
+            nivel_risco="high",
+            motivos_risco=["Query SQL vazia ou inválida."],
         )
 
     try:
@@ -83,12 +101,16 @@ def analyze_ast_risk(sql: str) -> DeterministicRiskResult:
         return DeterministicRiskResult(
             level="high",
             reasons=[f"Erro de parsing SQL: {exc}"],
+            nivel_risco="high",
+            motivos_risco=[f"Erro de parsing SQL: {exc}"],
         )
 
     if ast is None:
         return DeterministicRiskResult(
             level="high",
             reasons=["Query SQL vazia ou inválida."],
+            nivel_risco="high",
+            motivos_risco=["Query SQL vazia ou inválida."],
         )
 
     reasons: list[str] = []
@@ -119,18 +141,21 @@ def analyze_ast_risk(sql: str) -> DeterministicRiskResult:
                     f"Exposição de registros individuais da tabela sensível '{s_table}' sem agregação"
                 )
 
-    # 3. Missing WHERE on Fact tables
+    # 3. Missing WHERE on Fact tables (unaggregated and unfiltered queries)
     fact_tables_accessed = [t for t in sorted(physical_tables_set) if t in FACT_TABLES]
     missing_where_on_fact_tables = False
     if fact_tables_accessed:
         has_where = ast.find(exp.Where) is not None
-        has_group_by = ast.find(exp.Group) is not None
-        if not has_where and not has_group_by:
-            missing_where_on_fact_tables = True
-            for ft in fact_tables_accessed:
-                reasons.append(
-                    f"Consulta na tabela de fatos volumosa '{ft}' sem filtro WHERE e sem agregação"
-                )
+        if not has_where:
+            unfiltered_unaggregated = [
+                ft for ft in fact_tables_accessed if _is_table_exposed_without_aggregation(ast, ft)
+            ]
+            if unfiltered_unaggregated:
+                missing_where_on_fact_tables = True
+                for ft in unfiltered_unaggregated:
+                    reasons.append(
+                        f"Consulta na tabela de fatos volumosa '{ft}' sem filtro WHERE e sem agregação"
+                    )
 
     # 4. Join complexity and cartesian joins
     joins = list(ast.find_all(exp.Join))
@@ -170,4 +195,6 @@ def analyze_ast_risk(sql: str) -> DeterministicRiskResult:
         join_count=join_count,
         has_cross_join=has_cross_join,
         missing_where_on_fact_tables=missing_where_on_fact_tables,
+        nivel_risco=level,
+        motivos_risco=deduped_reasons,
     )

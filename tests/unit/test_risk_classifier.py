@@ -17,7 +17,9 @@ class TestRiskClassifierLowRisk:
         sql = "SELECT * FROM artist LIMIT 10"
         result = analyze_ast_risk(sql)
         assert result.level == "low"
+        assert result.nivel_risco == "low"
         assert result.reasons == []
+        assert result.motivos_risco == []
         assert result.sensitive_tables_accessed == []
         assert result.pii_columns_accessed == []
         assert result.join_count == 0
@@ -32,7 +34,9 @@ class TestRiskClassifierLowRisk:
         )
         result = analyze_ast_risk(sql)
         assert result.level == "low"
+        assert result.nivel_risco == "low"
         assert result.reasons == []
+        assert result.motivos_risco == []
         assert result.join_count == 1
         assert result.has_cross_join is False
         assert result.sensitive_tables_accessed == []
@@ -42,7 +46,9 @@ class TestRiskClassifierLowRisk:
         sql = "SELECT billing_country, sum(total) FROM invoice GROUP BY billing_country"
         result = analyze_ast_risk(sql)
         assert result.level == "low"
+        assert result.nivel_risco == "low"
         assert result.reasons == []
+        assert result.motivos_risco == []
         assert result.sensitive_tables_accessed == ["invoice"]
         assert result.pii_columns_accessed == []
         assert result.join_count == 0
@@ -52,7 +58,9 @@ class TestRiskClassifierLowRisk:
         sql = "SELECT count(*) FROM customer"
         result = analyze_ast_risk(sql)
         assert result.level == "low"
+        assert result.nivel_risco == "low"
         assert result.reasons == []
+        assert result.motivos_risco == []
         assert result.sensitive_tables_accessed == ["customer"]
         assert result.pii_columns_accessed == []
 
@@ -60,9 +68,29 @@ class TestRiskClassifierLowRisk:
         sql = "SELECT * FROM track WHERE genre_id = 1"
         result = analyze_ast_risk(sql)
         assert result.level == "low"
+        assert result.nivel_risco == "low"
         assert result.reasons == []
+        assert result.motivos_risco == []
         assert result.missing_where_on_fact_tables is False
         assert result.join_count == 0
+
+    def test_scalar_aggregation_on_fact_tables_low_risk(self) -> None:
+        """Scalar aggregations on fact tables must be classified as low risk."""
+        sql_count = "SELECT count(*) FROM track"
+        res_count = analyze_ast_risk(sql_count)
+        assert res_count.level == "low"
+        assert res_count.nivel_risco == "low"
+        assert res_count.missing_where_on_fact_tables is False
+        assert res_count.reasons == []
+        assert res_count.motivos_risco == []
+
+        sql_sum = "SELECT sum(quantity) FROM invoice_line"
+        res_sum = analyze_ast_risk(sql_sum)
+        assert res_sum.level == "low"
+        assert res_sum.nivel_risco == "low"
+        assert res_sum.missing_where_on_fact_tables is False
+        assert res_sum.reasons == []
+        assert res_sum.motivos_risco == []
 
 
 class TestRiskClassifierHighRisk:
@@ -72,28 +100,40 @@ class TestRiskClassifierHighRisk:
         sql = "SELECT first_name, last_name, email, phone FROM customer"
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.sensitive_tables_accessed == ["customer"]
         assert result.pii_columns_accessed == ["email", "phone"]
         assert "Acesso a colunas com dados pessoais/PII: email, phone" in result.reasons
+        assert "Acesso a colunas com dados pessoais/PII: email, phone" in result.motivos_risco
         assert (
             "Exposição de registros individuais da tabela sensível 'customer' sem agregação"
             in result.reasons
+        )
+        assert (
+            "Exposição de registros individuais da tabela sensível 'customer' sem agregação"
+            in result.motivos_risco
         )
 
     def test_sensitive_table_customer_individual_records(self) -> None:
         sql = "SELECT * FROM customer"
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.sensitive_tables_accessed == ["customer"]
         assert (
             "Exposição de registros individuais da tabela sensível 'customer' sem agregação"
             in result.reasons
+        )
+        assert (
+            "Exposição de registros individuais da tabela sensível 'customer' sem agregação"
+            in result.motivos_risco
         )
 
     def test_sensitive_table_employee_individual_records(self) -> None:
         sql = "SELECT * FROM employee"
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.sensitive_tables_accessed == ["employee"]
         assert (
             "Exposição de registros individuais da tabela sensível 'employee' sem agregação"
@@ -104,6 +144,7 @@ class TestRiskClassifierHighRisk:
         sql = "SELECT * FROM invoice"
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.sensitive_tables_accessed == ["invoice"]
         assert (
             "Exposição de registros individuais da tabela sensível 'invoice' sem agregação"
@@ -114,16 +155,22 @@ class TestRiskClassifierHighRisk:
         sql = "SELECT * FROM track"
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.missing_where_on_fact_tables is True
         assert (
             "Consulta na tabela de fatos volumosa 'track' sem filtro WHERE e sem agregação"
             in result.reasons
+        )
+        assert (
+            "Consulta na tabela de fatos volumosa 'track' sem filtro WHERE e sem agregação"
+            in result.motivos_risco
         )
 
     def test_cross_join_explicit(self) -> None:
         sql = "SELECT * FROM artist CROSS JOIN album"
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.has_cross_join is True
         assert "Presença de CROSS JOIN ou junção cartesiana sem condição ON" in result.reasons
 
@@ -131,6 +178,7 @@ class TestRiskClassifierHighRisk:
         sql = "SELECT * FROM artist JOIN album"
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.has_cross_join is True
         assert "Presença de CROSS JOIN ou junção cartesiana sem condição ON" in result.reasons
 
@@ -146,6 +194,7 @@ class TestRiskClassifierHighRisk:
         )
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.join_count == 4
         assert result.has_cross_join is False
         assert result.missing_where_on_fact_tables is False
@@ -158,19 +207,24 @@ class TestRiskClassifierEdgeCases:
     def test_empty_sql(self) -> None:
         result = analyze_ast_risk("")
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert len(result.reasons) > 0
+        assert len(result.motivos_risco) > 0
         assert "vazia" in result.reasons[0].lower() or "parsing" in result.reasons[0].lower()
 
     def test_malformed_sql(self) -> None:
         result = analyze_ast_risk("SELECT FROM WHERE")
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert len(result.reasons) > 0
+        assert len(result.motivos_risco) > 0
         assert "parsing" in result.reasons[0].lower() or "erro" in result.reasons[0].lower()
 
     def test_case_insensitivity(self) -> None:
         sql = "SELECT Email, Phone FROM Customer"
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.sensitive_tables_accessed == ["customer"]
         assert result.pii_columns_accessed == ["email", "phone"]
         assert "Acesso a colunas com dados pessoais/PII: email, phone" in result.reasons
@@ -179,6 +233,7 @@ class TestRiskClassifierEdgeCases:
         sql = "SELECT count(*) FROM customer WHERE email = 'test@example.com'"
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.sensitive_tables_accessed == ["customer"]
         assert result.pii_columns_accessed == ["email"]
         assert "Acesso a colunas com dados pessoais/PII: email" in result.reasons
@@ -191,6 +246,7 @@ class TestRiskClassifierEdgeCases:
         )
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.sensitive_tables_accessed == ["customer", "invoice"]
         assert (
             "Exposição de registros individuais da tabela sensível 'customer' sem agregação"
@@ -205,6 +261,7 @@ class TestRiskClassifierEdgeCases:
         sql = "SELECT * FROM track t JOIN invoice_line il ON t.track_id = il.track_id"
         result = analyze_ast_risk(sql)
         assert result.level == "high"
+        assert result.nivel_risco == "high"
         assert result.missing_where_on_fact_tables is True
         assert (
             "Consulta na tabela de fatos volumosa 'invoice_line' sem filtro WHERE e sem agregação"
@@ -226,7 +283,9 @@ class TestRiskClassifierEdgeCases:
         )
         result = analyze_ast_risk(sql)
         assert result.level == "low"
+        assert result.nivel_risco == "low"
         assert result.reasons == []
+        assert result.motivos_risco == []
         assert result.sensitive_tables_accessed == ["invoice"]
 
     def test_type_alias_and_constants(self) -> None:
@@ -234,8 +293,17 @@ class TestRiskClassifierEdgeCases:
         assert "employee" in SENSITIVE_TABLES
         assert "customer" in SENSITIVE_TABLES
         assert "invoice" in SENSITIVE_TABLES
-        assert "email" in PII_COLUMNS
-        assert "phone" in PII_COLUMNS
+        assert PII_COLUMNS == frozenset({"email", "phone", "address", "birth_date", "postal_code"})
+        assert "fax" not in PII_COLUMNS
         assert "track" in FACT_TABLES
         assert "invoice_line" in FACT_TABLES
         assert "playlist_track" in FACT_TABLES
+
+    def test_agent_state_field_synchronization(self) -> None:
+        res_from_pt = DeterministicRiskResult(nivel_risco="high", motivos_risco=["motivo teste"])
+        assert res_from_pt.level == "high"
+        assert res_from_pt.reasons == ["motivo teste"]
+
+        res_from_en = DeterministicRiskResult(level="high", reasons=["english reason"])
+        assert res_from_en.nivel_risco == "high"
+        assert res_from_en.motivos_risco == ["english reason"]
