@@ -1,6 +1,7 @@
 """Security module: AST validation, risk classification, and safety constants."""
 
 from app.security.validator import (
+    ALLOWED_SCHEMAS,
     FORBIDDEN_EXPRESSIONS,
     FORBIDDEN_FUNCTIONS,
     FORBIDDEN_SCHEMAS,
@@ -9,6 +10,7 @@ from app.security.validator import (
 )
 
 __all__ = [
+    "ALLOWED_SCHEMAS",
     "FORBIDDEN_EXPRESSIONS",
     "FORBIDDEN_FUNCTIONS",
     "FORBIDDEN_SCHEMAS",

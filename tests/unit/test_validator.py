@@ -4,6 +4,7 @@ import pytest
 from sqlglot import exp
 
 from app.security import (
+    ALLOWED_SCHEMAS,
     FORBIDDEN_EXPRESSIONS,
     FORBIDDEN_FUNCTIONS,
     FORBIDDEN_SCHEMAS,
@@ -31,18 +32,39 @@ def test_exports_and_constants() -> None:
     assert issubclass(ValidationResult, object)
     assert callable(validate_and_transform_sql)
 
+    # Sleep functions
     assert "pg_sleep" in FORBIDDEN_FUNCTIONS
+    assert "pg_sleep_for" in FORBIDDEN_FUNCTIONS
+    assert "pg_sleep_until" in FORBIDDEN_FUNCTIONS
+
+    # Backend admin functions
+    assert "pg_terminate_backend" in FORBIDDEN_FUNCTIONS
+    assert "pg_cancel_backend" in FORBIDDEN_FUNCTIONS
+
+    # File functions
     assert "pg_read_file" in FORBIDDEN_FUNCTIONS
     assert "pg_write_file" in FORBIDDEN_FUNCTIONS
     assert "pg_read_binary_file" in FORBIDDEN_FUNCTIONS
+    assert "pg_ls_dir" in FORBIDDEN_FUNCTIONS
+    assert "pg_stat_file" in FORBIDDEN_FUNCTIONS
+
+    # dblink
     assert "dblink" in FORBIDDEN_FUNCTIONS
     assert "dblink_exec" in FORBIDDEN_FUNCTIONS
+
+    # Large objects
     assert "lo_import" in FORBIDDEN_FUNCTIONS
     assert "lo_export" in FORBIDDEN_FUNCTIONS
+    assert "lo_get" in FORBIDDEN_FUNCTIONS
+    assert "lo_put" in FORBIDDEN_FUNCTIONS
+    assert "lo_unlink" in FORBIDDEN_FUNCTIONS
+
+    # Config and XML
     assert "set_config" in FORBIDDEN_FUNCTIONS
     assert "current_setting" in FORBIDDEN_FUNCTIONS
     assert "query_to_xml" in FORBIDDEN_FUNCTIONS
 
+    # Expressions
     assert exp.Insert in FORBIDDEN_EXPRESSIONS
     assert exp.Update in FORBIDDEN_EXPRESSIONS
     assert exp.Delete in FORBIDDEN_EXPRESSIONS
@@ -50,7 +72,11 @@ def test_exports_and_constants() -> None:
     assert exp.Alter in FORBIDDEN_EXPRESSIONS
     assert exp.Command in FORBIDDEN_EXPRESSIONS
     assert exp.Transaction in FORBIDDEN_EXPRESSIONS
+    assert exp.Into in FORBIDDEN_EXPRESSIONS
 
+    # Schemas
+    assert "" in ALLOWED_SCHEMAS
+    assert "public" in ALLOWED_SCHEMAS
     assert "pg_catalog" in FORBIDDEN_SCHEMAS
     assert "information_schema" in FORBIDDEN_SCHEMAS
     assert "internal" in FORBIDDEN_SCHEMAS
@@ -170,6 +196,16 @@ def test_block_mutations(sql: str) -> None:
     assert result.transformed_sql is None
 
 
+def test_block_select_into() -> None:
+    """SELECT ... INTO ... statements must be rejected."""
+    sql = "SELECT * INTO new_table FROM artist"
+    result = validate_and_transform_sql(sql, valid_tables=VALID_TABLES)
+
+    assert result.is_valid is False
+    assert any("into" in err.lower() for err in result.errors)
+    assert result.transformed_sql is None
+
+
 def test_block_mutation_inside_cte() -> None:
     """Data-modifying CTEs must be blocked."""
     sql = """
@@ -185,17 +221,41 @@ def test_block_mutation_inside_cte() -> None:
     assert result.transformed_sql is None
 
 
+def test_block_cte_shadowing_bypass() -> None:
+    """CTEs shadowing forbidden or unknown tables must not bypass security checks."""
+    # Attempting to access forbidden schema/table internal.audit_logs via CTE alias
+    sql1 = "WITH audit_logs AS (SELECT * FROM internal.audit_logs) SELECT * FROM audit_logs"
+    res1 = validate_and_transform_sql(sql1, valid_tables=VALID_TABLES)
+    assert res1.is_valid is False
+    assert any("internal" in err.lower() or "audit_logs" in err.lower() for err in res1.errors)
+
+    # Attempting to access unknown table pg_tables via CTE alias
+    sql2 = "WITH pg_tables AS (SELECT * FROM pg_tables) SELECT * FROM pg_tables"
+    res2 = validate_and_transform_sql(sql2, valid_tables=VALID_TABLES)
+    assert res2.is_valid is False
+    assert any("pg_tables" in err.lower() for err in res2.errors)
+
+
 @pytest.mark.parametrize(
     "func_call",
     [
         "pg_sleep(5)",
+        "pg_sleep_for('5 seconds')",
+        "pg_sleep_until('2026-11-03')",
+        "pg_terminate_backend(1234)",
+        "pg_cancel_backend(1234)",
         "pg_read_file('/etc/passwd')",
         "pg_write_file('/tmp/test', 'pwn')",
         "pg_read_binary_file('/etc/shadow')",
+        "pg_ls_dir('/tmp')",
+        "pg_stat_file('/etc/passwd')",
         "dblink('host=remote', 'SELECT 1')",
         "dblink_exec('host=remote', 'DROP TABLE artist')",
         "lo_import('/etc/passwd')",
         "lo_export(1, '/tmp/leak')",
+        "lo_get(1)",
+        "lo_put(1, 0, 'data')",
+        "lo_unlink(1)",
         "set_config('role', 'admin', false)",
         "current_setting('app.token')",
         "query_to_xml('SELECT * FROM artist', true, false, '')",
@@ -225,6 +285,23 @@ def test_block_forbidden_schemas(sql: str) -> None:
 
     assert result.is_valid is False
     assert len(result.errors) > 0
+    assert result.transformed_sql is None
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM secret.artist",
+        "SELECT * FROM mydb.artist",
+        "SELECT * FROM custom_schema.track",
+    ],
+)
+def test_block_unauthorized_schemas(sql: str) -> None:
+    """Schemas other than public or empty must be rejected."""
+    result = validate_and_transform_sql(sql, valid_tables=VALID_TABLES)
+
+    assert result.is_valid is False
+    assert any("schema" in err.lower() for err in result.errors)
     assert result.transformed_sql is None
 
 
