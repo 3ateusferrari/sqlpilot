@@ -1,12 +1,13 @@
 """Structured logging configuration for SQLPilot using structlog."""
 
 import logging
-import os
 import sys
 from typing import Any, cast
 
 import structlog
 from structlog.types import EventDict, Processor
+
+from app.config import settings
 
 
 def add_app_context(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
@@ -15,22 +16,24 @@ def add_app_context(logger: Any, method_name: str, event_dict: EventDict) -> Eve
     return event_dict
 
 
-def setup_logging(json_format: bool | None = None, log_level: str = "INFO") -> None:
+def setup_logging(json_format: bool | None = None, log_level: str | None = None) -> None:
     """Configure structlog and standard logging.
 
     Args:
-        json_format: Whether to format output as JSON. If None, checks LOG_JSON env var.
-        log_level: Minimum log level to record.
+        json_format: Whether to format output as JSON. If None, uses settings.log_json.
+        log_level: Minimum log level to record. If None, uses settings.log_level.
     """
     if json_format is None:
-        json_format = os.getenv("LOG_JSON", "false").lower() in ("true", "1", "yes")
+        json_format = settings.log_json
+
+    if log_level is None:
+        log_level = settings.log_level
 
     numeric_level = getattr(logging, log_level.upper(), logging.INFO)
 
     shared_processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,
         add_app_context,
-        structlog.stdlib.filter_by_level,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),
@@ -43,11 +46,12 @@ def setup_logging(json_format: bool | None = None, log_level: str = "INFO") -> N
     if json_format:
         formatter_processor: Processor = structlog.processors.JSONRenderer()
     else:
-        formatter_processor = structlog.dev.ConsoleRenderer(colors=True)
+        formatter_processor = structlog.dev.ConsoleRenderer(colors=False)
 
     structlog.configure(
-        processors=shared_processors
-        + [
+        processors=[
+            structlog.stdlib.filter_by_level,
+            *shared_processors,
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         logger_factory=structlog.stdlib.LoggerFactory(),

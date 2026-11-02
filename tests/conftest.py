@@ -20,6 +20,8 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
         "LANGFUSE_PUBLIC_KEY",
         "LANGFUSE_SECRET_KEY",
         "LANGFUSE_HOST",
+        "LOG_LEVEL",
+        "LOG_JSON",
     ]
     for key in keys_to_clear:
         monkeypatch.delenv(key, raising=False)

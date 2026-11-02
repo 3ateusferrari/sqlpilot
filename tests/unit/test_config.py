@@ -25,6 +25,8 @@ def test_settings_default_values(clean_env: pytest.MonkeyPatch) -> None:
     assert settings.langfuse_public_key == ""
     assert settings.langfuse_secret_key == ""
     assert settings.langfuse_host == "https://cloud.langfuse.com"
+    assert settings.log_level == "INFO"
+    assert settings.log_json is False
 
 
 def test_settings_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -42,6 +44,8 @@ def test_settings_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
     monkeypatch.setenv("LANGFUSE_HOST", "https://custom.langfuse.com")
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("LOG_JSON", "true")
 
     settings = Settings(_env_file=None)
 
@@ -58,6 +62,8 @@ def test_settings_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.langfuse_public_key == "pk-lf-test"
     assert settings.langfuse_secret_key == "sk-lf-test"
     assert settings.langfuse_host == "https://custom.langfuse.com"
+    assert settings.log_level == "DEBUG"
+    assert settings.log_json is True
 
 
 def test_settings_direct_kwargs() -> None:
@@ -67,10 +73,14 @@ def test_settings_direct_kwargs() -> None:
         llm_model="custom-model",
         default_row_limit=42,
         enable_llm_risk_classifier=True,
+        log_level="WARNING",
+        log_json=True,
     )
     assert settings.llm_model == "custom-model"
     assert settings.default_row_limit == 42
     assert settings.enable_llm_risk_classifier is True
+    assert settings.log_level == "WARNING"
+    assert settings.log_json is True
 
 
 def test_get_settings_cached() -> None:

@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     langfuse_secret_key: str = ""
     langfuse_host: str = "https://cloud.langfuse.com"
 
+    # Logging
+    log_level: str = "INFO"
+    log_json: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
