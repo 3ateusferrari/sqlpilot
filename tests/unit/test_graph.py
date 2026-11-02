@@ -11,6 +11,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage
 
 from app.config import settings
+from app.graph.edges import route_after_validation
 from app.graph.llm import get_llm
 from app.graph.nodes import (
     _clean_sql_markdown,
@@ -18,6 +19,7 @@ from app.graph.nodes import (
     executar_sql_node,
     gerar_sql_node,
     responder_em_linguagem_natural_node,
+    validar_sql_node,
 )
 from app.graph.prompts import SYSTEM_PROMPT_NL_RESPONSE, SYSTEM_PROMPT_SQL_GEN
 from app.graph.state import (
@@ -282,3 +284,113 @@ async def test_executar_sql_node_no_description_query() -> None:
     assert update["erro_execucao"] is None
     # fetchall should NOT have been called since cur.description was None
     mock_cur.fetchall.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_gerar_sql_node_retry_prompt_injection() -> None:
+    """Verify gerar_sql_node injects retry context when erros_validacao exists in state."""
+    mock_llm = MagicMock()
+    mock_runnable = MagicMock()
+    mock_runnable.ainvoke = AsyncMock(
+        return_value=GeneratedSQL(
+            sql="SELECT * FROM artist LIMIT 5;",
+            reasoning="Consulta corrigida.",
+        )
+    )
+    mock_llm.with_structured_output.return_value = mock_runnable
+
+    captured_messages: list[Any] = []
+
+    async def fake_ainvoke(messages: list[Any]) -> GeneratedSQL:
+        captured_messages.extend(messages)
+        return GeneratedSQL(
+            sql="SELECT * FROM artist LIMIT 5;",
+            reasoning="Consulta corrigida.",
+        )
+
+    mock_runnable.ainvoke = fake_ainvoke
+
+    with patch("app.graph.nodes.get_llm", return_value=mock_llm):
+        state: AgentState = {
+            "pergunta": "Listar artistas",
+            "schema_context": "...",
+            "sql_gerado": "SELECT * FROM artista_fantasma;",
+            "erros_validacao": ["Tabela 'artista_fantasma' não é permitida ou não existe."],
+        }
+        await gerar_sql_node(state)
+
+    human_message = captured_messages[1].content
+    assert "Pergunta do usuário: Listar artistas" in human_message
+    assert "Tentativa anterior: SELECT * FROM artista_fantasma;" in human_message
+    assert (
+        "Erros encontrados na validação: Tabela 'artista_fantasma' não é permitida ou não existe."
+        in human_message
+    )
+    assert (
+        "Por favor, corrija o SQL evitando esses erros e mantendo o schema Chinook."
+        in human_message
+    )
+
+
+@pytest.mark.asyncio
+async def test_validar_sql_node_success() -> None:
+    """Verify validar_sql_node sets sql_final with injected LIMIT and empties erros_validacao."""
+    state: AgentState = {
+        "sql_gerado": "SELECT name FROM artist;",
+        "valid_tables": ["artist"],
+    }
+    update = await validar_sql_node(state)
+
+    assert "LIMIT 100" in update["sql_final"]
+    assert update["erros_validacao"] == []
+
+
+@pytest.mark.asyncio
+async def test_validar_sql_node_failure_increments_attempts() -> None:
+    """Verify validar_sql_node records errors and increments tentativas counter."""
+    state: AgentState = {
+        "sql_gerado": "SELECT * FROM tabela_inexistente;",
+        "valid_tables": ["artist"],
+        "tentativas": 1,
+    }
+    update = await validar_sql_node(state)
+
+    assert update["tentativas"] == 2
+    assert len(update["erros_validacao"]) > 0
+    assert "tabela_inexistente" in update["erros_validacao"][0]
+
+
+def test_route_after_validation() -> None:
+    """Verify route_after_validation routes correctly based on errors and retry limit."""
+    # 1. No errors -> executar_sql
+    state_valid: AgentState = {"erros_validacao": [], "tentativas": 0}
+    assert route_after_validation(state_valid) == "executar_sql"
+
+    state_no_key: AgentState = {}
+    assert route_after_validation(state_no_key) == "executar_sql"
+
+    # 2. Errors with tentativas < 3 -> gerar_sql (retry)
+    state_retry_1: AgentState = {
+        "erros_validacao": ["Tabela inválida"],
+        "tentativas": 1,
+    }
+    assert route_after_validation(state_retry_1) == "gerar_sql"
+
+    state_retry_2: AgentState = {
+        "erros_validacao": ["Tabela inválida"],
+        "tentativas": 2,
+    }
+    assert route_after_validation(state_retry_2) == "gerar_sql"
+
+    # 3. Errors with tentativas >= 3 -> responder_em_linguagem_natural
+    state_exhausted_3: AgentState = {
+        "erros_validacao": ["Tabela inválida"],
+        "tentativas": 3,
+    }
+    assert route_after_validation(state_exhausted_3) == "responder_em_linguagem_natural"
+
+    state_exhausted_4: AgentState = {
+        "erros_validacao": ["Tabela inválida"],
+        "tentativas": 4,
+    }
+    assert route_after_validation(state_exhausted_4) == "responder_em_linguagem_natural"

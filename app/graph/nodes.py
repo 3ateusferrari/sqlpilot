@@ -16,6 +16,7 @@ from app.graph.llm import get_llm
 from app.graph.prompts import SYSTEM_PROMPT_NL_RESPONSE, SYSTEM_PROMPT_SQL_GEN
 from app.graph.state import AgentState, GeneratedSQL
 from app.logging import get_logger
+from app.security.validator import validate_and_transform_sql
 
 logger = get_logger(__name__)
 
@@ -69,6 +70,17 @@ async def gerar_sql_node(state: AgentState) -> dict[str, Any]:
     system_message = SYSTEM_PROMPT_SQL_GEN.format(schema_context=schema_context)
     human_content = f"Pergunta do usuário: {pergunta}"
 
+    erros = state.get("erros_validacao")
+    if erros:
+        sql_gerado = state.get("sql_gerado", "")
+        erros_str = "; ".join(erros) if isinstance(erros, list) else str(erros)
+        retry_context = (
+            f"\n\nTentativa anterior: {sql_gerado}\n"
+            f"Erros encontrados na validação: {erros_str}\n"
+            "Por favor, corrija o SQL evitando esses erros e mantendo o schema Chinook."
+        )
+        human_content += retry_context
+
     messages = [
         SystemMessage(content=system_message),
         HumanMessage(content=human_content),
@@ -98,6 +110,38 @@ async def gerar_sql_node(state: AgentState) -> dict[str, Any]:
         "sql_gerado": sql,
         "raciocinio_sql": reasoning,
         "sql_final": sql,
+    }
+
+
+async def validar_sql_node(state: AgentState) -> dict[str, Any]:
+    """Validate generated SQL query against AST security rules and Chinook schema.
+
+    Enforces read-only SELECT instructions, valid tables whitelist, and automatic
+    LIMIT clamping/injection.
+    """
+    sql = state.get("sql_gerado", "")
+    valid_tables = state.get("valid_tables", [])
+    logger.info("validar_sql_node_executing", sql=sql)
+
+    res = validate_and_transform_sql(
+        sql=sql,
+        valid_tables=valid_tables,
+        default_limit=settings.default_row_limit,
+        max_limit=1000,
+    )
+
+    if res.is_valid:
+        logger.info("validar_sql_node_valid", transformed_sql=res.transformed_sql)
+        return {
+            "sql_final": res.transformed_sql,
+            "erros_validacao": [],
+        }
+
+    tentativas = state.get("tentativas", 0) + 1
+    logger.warning("validar_sql_node_invalid", errors=res.errors, tentativas=tentativas)
+    return {
+        "tentativas": tentativas,
+        "erros_validacao": res.errors,
     }
 
 
@@ -139,6 +183,22 @@ async def executar_sql_node(state: AgentState) -> dict[str, Any]:
 
 async def responder_em_linguagem_natural_node(state: AgentState) -> dict[str, Any]:
     """Synthesize query results into a natural language response in Portuguese."""
+    erros_validacao = state.get("erros_validacao")
+    if erros_validacao:
+        logger.info(
+            "responder_em_linguagem_natural_reporting_validation_errors", erros=erros_validacao
+        )
+        erros_str = (
+            "; ".join(erros_validacao)
+            if isinstance(erros_validacao, list)
+            else str(erros_validacao)
+        )
+        return {
+            "resposta": (
+                f"Não foi possível processar a consulta devido a erros de validação: {erros_str}"
+            )
+        }
+
     erro = state.get("erro_execucao")
     if erro:
         logger.info("responder_em_linguagem_natural_reporting_error", erro=erro)

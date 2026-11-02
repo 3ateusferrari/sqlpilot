@@ -178,7 +178,8 @@ async def test_full_linear_graph_end_to_end() -> None:
 
     # 2. Generated SQL check
     assert final_state["sql_gerado"] == expected_sql
-    assert final_state["sql_final"] == expected_sql
+    assert "LIMIT 5" in final_state["sql_final"]
+    assert "artist" in final_state["sql_final"].lower()
     assert "inner join" in final_state["raciocinio_sql"].lower()
 
     # 3. Execution check against Chinook
