@@ -1,9 +1,12 @@
 """Integration tests for connection pools and SchemaLoader."""
 
+from collections.abc import AsyncIterator
+
 import pytest
 
 from app.db.schema_loader import SchemaLoader, is_sensitive_column, mask_sensitive_value
 from app.db.session import (
+    _mask_database_url,
     close_pools,
     get_admin_connection,
     get_admin_pool,
@@ -27,7 +30,7 @@ EXPECTED_CHINOOK_TABLES = [
 
 
 @pytest.fixture(autouse=True)
-async def cleanup_db_pools() -> None:
+async def cleanup_db_pools() -> AsyncIterator[None]:
     """Ensure pools are cleanly closed after each test."""
     yield
     await close_pools()
@@ -183,7 +186,7 @@ async def test_schema_loader_caching() -> None:
 
 def test_sensitive_masking_unit() -> None:
     """Unit test individual masking rules for sensitive vs non-sensitive columns."""
-    # Sensitive column detection
+    # Sensitive column detection (expanded list)
     assert is_sensitive_column("email")
     assert is_sensitive_column("phone")
     assert is_sensitive_column("fax")
@@ -191,6 +194,11 @@ def test_sensitive_masking_unit() -> None:
     assert is_sensitive_column("billing_address")
     assert is_sensitive_column("postal_code")
     assert is_sensitive_column("billing_postal_code")
+    assert is_sensitive_column("password")
+    assert is_sensitive_column("secret_token")
+    assert is_sensitive_column("user_cpf")
+    assert is_sensitive_column("credit_card_number")
+    assert is_sensitive_column("employee_ssn")
 
     # Non-sensitive column detection
     assert not is_sensitive_column("artist_id")
@@ -208,6 +216,9 @@ def test_sensitive_masking_unit() -> None:
     assert mask_sensitive_value("title", "Let There Be Rock") == "Let There Be Rock"
     assert mask_sensitive_value("company", "Embraer") == "Embraer"
 
+    # Sanitization of newlines and comment escapes
+    assert mask_sensitive_value("name", "Line1\nLine2*/Break") == "Line1 Line2* /Break"
+
     # Email
     assert mask_sensitive_value("email", "john.doe@example.com") == "j***@example.com"
     assert mask_sensitive_value("email", None) is None
@@ -223,6 +234,27 @@ def test_sensitive_masking_unit() -> None:
 
     # Postal code
     assert mask_sensitive_value("postal_code", "12345-678") == "12***"
+
+    # Generic sensitive
+    assert mask_sensitive_value("password", "supersecret") == "***"
+    assert mask_sensitive_value("secret", "mytoken") == "***"
+
+
+def test_mask_database_url() -> None:
+    """Validate that connection string passwords are masked properly."""
+    url1 = "postgresql://sqlpilot_readonly:readonly_pass@localhost:5432/chinook"
+    assert _mask_database_url(url1) == "postgresql://sqlpilot_readonly:***@localhost:5432/chinook"
+
+    # Password containing '@'
+    url2 = "postgresql://user:pass@with@sign@localhost:5432/db"
+    assert "pass@with@sign" not in _mask_database_url(url2)
+    assert "***" in _mask_database_url(url2)
+
+    # Libpq format
+    url3 = "host=localhost port=5432 user=usr password=secret dbname=db"
+    masked3 = _mask_database_url(url3)
+    assert "secret" not in masked3
+    assert "password=***" in masked3
 
 
 @pytest.mark.asyncio
@@ -256,3 +288,20 @@ async def test_session_connection_pools() -> None:
     new_admin_pool = get_admin_pool()
     assert new_admin_pool is not admin_pool
     assert not new_admin_pool.closed or not getattr(new_admin_pool, "_opened", False)
+
+
+@pytest.mark.asyncio
+async def test_close_pools_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Validate that a failure closing admin pool does not prevent closing readonly pool."""
+    readonly_pool = get_readonly_pool()
+    admin_pool = get_admin_pool()
+
+    # Mock admin_pool.close to raise an exception
+    async def mock_failing_close() -> None:
+        raise RuntimeError("Simulated admin pool close failure")
+
+    monkeypatch.setattr(admin_pool, "close", mock_failing_close)
+
+    # close_pools should handle exception without preventing readonly close
+    await close_pools()
+    assert readonly_pool.closed

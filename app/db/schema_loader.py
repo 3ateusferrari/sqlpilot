@@ -4,7 +4,7 @@ import re
 import time
 from typing import Any
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, sql
 from psycopg_pool import AsyncConnectionPool
 
 from app.db.session import get_readonly_pool
@@ -12,7 +12,19 @@ from app.logging import get_logger
 
 logger = get_logger(__name__)
 
-SENSITIVE_FIELD_PATTERNS = ("email", "phone", "fax", "address", "postal_code")
+SENSITIVE_FIELD_PATTERNS = (
+    "email",
+    "phone",
+    "fax",
+    "address",
+    "postal_code",
+    "password",
+    "secret",
+    "token",
+    "ssn",
+    "cpf",
+    "card",
+)
 
 
 def is_sensitive_column(column_name: str) -> bool:
@@ -22,12 +34,16 @@ def is_sensitive_column(column_name: str) -> bool:
 
 
 def mask_sensitive_value(column_name: str, value: Any) -> Any:
-    """Mask sensitive string values (emails, phones, addresses, postal codes)."""
-    if not is_sensitive_column(column_name):
-        return value
-
+    """Mask sensitive string values and sanitize comment breakouts."""
     if value is None:
         return None
+
+    # Sanitize newline breaks and block comment terminators for string values
+    if isinstance(value, str):
+        value = value.replace("\n", " ").replace("\r", " ").replace("*/", "* /")
+
+    if not is_sensitive_column(column_name):
+        return value
 
     val_str = str(value).strip()
     if not val_str:
@@ -240,8 +256,9 @@ class SchemaLoader:
 
                     ddl = f"CREATE TABLE {table} (\n" + ",\n".join(col_defs) + "\n);"
 
-                    # Fetch sample rows
-                    await cur.execute(f"SELECT * FROM {table} LIMIT 3")  # noqa: S608
+                    # Fetch sample rows using sql.SQL and sql.Identifier for safe query formatting
+                    sample_query = sql.SQL("SELECT * FROM {} LIMIT 3").format(sql.Identifier(table))
+                    await cur.execute(sample_query)
                     if cur.description:
                         sample_cols = [desc[0] for desc in cur.description]
                         sample_rows = await cur.fetchall()
@@ -249,8 +266,11 @@ class SchemaLoader:
                             header_line = " | ".join(sample_cols)
                             rows_lines = [
                                 " | ".join(
-                                    str(mask_sensitive_value(col, val))
-                                    if val is not None
+                                    str(masked_val)
+                                    .replace("\n", " ")
+                                    .replace("\r", " ")
+                                    .replace("*/", "* /")
+                                    if (masked_val := mask_sensitive_value(col, val)) is not None
                                     else "NULL"
                                     for col, val in zip(sample_cols, row, strict=True)
                                 )

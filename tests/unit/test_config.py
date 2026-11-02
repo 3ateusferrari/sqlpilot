@@ -7,7 +7,7 @@ from app.config import Settings, get_settings
 
 def test_settings_default_values(clean_env: pytest.MonkeyPatch) -> None:
     """Verify that Settings loads with expected default values."""
-    settings = Settings(_env_file=None)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert settings.anthropic_api_key == ""
     assert settings.llm_model == "claude-haiku-4-5"
@@ -47,7 +47,7 @@ def test_settings_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
     monkeypatch.setenv("LOG_JSON", "true")
 
-    settings = Settings(_env_file=None)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert settings.anthropic_api_key == "test-anthropic-key"
     assert settings.llm_model == "claude-3-opus-20240229"
@@ -69,7 +69,7 @@ def test_settings_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None
 def test_settings_direct_kwargs() -> None:
     """Verify that settings can be passed directly as arguments."""
     settings = Settings(
-        _env_file=None,
+        _env_file=None,  # type: ignore[call-arg]
         llm_model="custom-model",
         default_row_limit=42,
         enable_llm_risk_classifier=True,
