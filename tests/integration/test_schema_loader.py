@@ -42,6 +42,31 @@ async def test_get_valid_tables() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_valid_tables_independent_caching() -> None:
+    """Validate that get_valid_tables caches independently without calling load_schema."""
+    loader = SchemaLoader(ttl_seconds=60.0)
+
+    # load_schema has NOT been called
+    assert loader._cached_valid_tables is None
+    assert loader._cached_schema is None
+
+    tables1 = await loader.get_valid_tables(use_cache=True)
+    assert tables1 == EXPECTED_CHINOOK_TABLES
+    assert loader._cached_valid_tables is not None
+    assert loader._tables_cache_timestamp is not None
+    assert loader._cached_schema is None  # schema cache remains untouched
+
+    # Second call should reuse the cache
+    tables2 = await loader.get_valid_tables(use_cache=True)
+    assert tables1 is tables2
+
+    # Invalidate cache
+    loader.clear_cache()
+    assert loader._cached_valid_tables is None
+    assert loader._tables_cache_timestamp is None
+
+
+@pytest.mark.asyncio
 async def test_load_schema_structure() -> None:
     """Validate that load_schema generates valid DDL with PKs, FKs, columns and sample rows."""
     loader = SchemaLoader()
@@ -107,6 +132,31 @@ async def test_load_schema_masks_sensitive_data() -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_schema_preserves_non_sensitive_data() -> None:
+    """Validate that non-sensitive columns (artist name, album title, prices) are intact."""
+    loader = SchemaLoader()
+    _, schema_context = await loader.load_schema(use_cache=False)
+
+    # Non-sensitive artist sample rows
+    assert "AC/DC" in schema_context
+    assert "Accept" in schema_context
+    assert "Aerosmith" in schema_context
+
+    # Non-sensitive album titles
+    assert "For Those About To Rock We Salute You" in schema_context
+    assert "Balls to the Wall" in schema_context or "Let There Be Rock" in schema_context
+
+    # Non-sensitive genre names
+    assert "Rock" in schema_context
+    assert "Jazz" in schema_context
+
+    # Non-sensitive customer data (names and company)
+    assert "Luís" in schema_context
+    assert "Gonçalves" in schema_context
+    assert "Embraer" in schema_context
+
+
+@pytest.mark.asyncio
 async def test_schema_loader_caching() -> None:
     """Validate that consecutive calls with use_cache=True reuse in-memory cache."""
     loader = SchemaLoader(ttl_seconds=60.0)
@@ -132,7 +182,8 @@ async def test_schema_loader_caching() -> None:
 
 
 def test_sensitive_masking_unit() -> None:
-    """Unit test individual masking rules for email, phone, fax, address, postal_code."""
+    """Unit test individual masking rules for sensitive vs non-sensitive columns."""
+    # Sensitive column detection
     assert is_sensitive_column("email")
     assert is_sensitive_column("phone")
     assert is_sensitive_column("fax")
@@ -140,8 +191,22 @@ def test_sensitive_masking_unit() -> None:
     assert is_sensitive_column("billing_address")
     assert is_sensitive_column("postal_code")
     assert is_sensitive_column("billing_postal_code")
+
+    # Non-sensitive column detection
     assert not is_sensitive_column("artist_id")
+    assert not is_sensitive_column("name")
     assert not is_sensitive_column("title")
+    assert not is_sensitive_column("unit_price")
+    assert not is_sensitive_column("company")
+    assert not is_sensitive_column("first_name")
+    assert not is_sensitive_column("last_name")
+
+    # Non-sensitive values preserved completely intact
+    assert mask_sensitive_value("name", "AC/DC") == "AC/DC"
+    assert mask_sensitive_value("artist_id", 42) == 42
+    assert mask_sensitive_value("unit_price", 0.99) == 0.99
+    assert mask_sensitive_value("title", "Let There Be Rock") == "Let There Be Rock"
+    assert mask_sensitive_value("company", "Embraer") == "Embraer"
 
     # Email
     assert mask_sensitive_value("email", "john.doe@example.com") == "j***@example.com"
