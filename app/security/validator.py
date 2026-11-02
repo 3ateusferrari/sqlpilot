@@ -95,20 +95,31 @@ def _is_select_tree(node: sqlglot.Expr) -> bool:
     return False
 
 
-def _is_aggregate_expression(expr: sqlglot.Expr) -> bool:
-    """Check if an expression is an aggregate function or wrapped aggregate."""
+def _is_aggregate_expression(expr: sqlglot.Expr, root_node: sqlglot.Expr) -> bool:
+    """Check if an expression is an aggregate function or wrapped aggregate belonging to root_node."""
     unaliased = expr.unalias()
+    # Reject subqueries or expressions containing subqueries/nested SELECTs
+    if isinstance(unaliased, (exp.Subquery, exp.Select)):
+        return False
+    if unaliased.find(exp.Subquery, exp.Select) is not None:
+        return False
     if unaliased.find(exp.Window) is not None:
         return False
-    if isinstance(unaliased, exp.AggFunc):
-        return True
+
     agg_funcs = list(unaliased.find_all(exp.AggFunc))
     if not agg_funcs:
         return False
+
+    # Ensure all aggregate functions belong directly to root_node
+    for agg in agg_funcs:
+        if agg.find_ancestor(exp.Select) is not root_node:
+            return False
+
     # If it contains an aggregate function, ensure all column references are within an aggregate
     for col in unaliased.find_all(exp.Column):
         if col.find_ancestor(exp.AggFunc) is None:
             return False
+
     return True
 
 
@@ -121,7 +132,7 @@ def _is_pure_scalar_aggregation(node: sqlglot.Expr) -> bool:
     selects = node.selects
     if not selects:
         return False
-    return all(_is_aggregate_expression(s) for s in selects)
+    return all(_is_aggregate_expression(s, node) for s in selects)
 
 
 def _extract_function_name(func_node: exp.Func | exp.Anonymous) -> str:
@@ -284,18 +295,44 @@ def validate_and_transform_sql(
     is_scalar_agg = _is_pure_scalar_aggregation(target)
     limit_injected = False
     original_limit: int | None = None
+    effective_default = min(default_limit, max_limit)
 
     if hasattr(target, "limit"):
         lim = target.args.get("limit")
         if lim is None:
             if not is_scalar_agg:
-                target.limit(default_limit, copy=False)
+                target.limit(effective_default, copy=False)
                 limit_injected = True
+        elif isinstance(lim, exp.Fetch):
+            count_node = lim.args.get("count")
+            fetch_count: int | None = None
+            if count_node is not None:
+                if isinstance(count_node, exp.Var) and count_node.name.upper() == "ALL":
+                    lim.set("count", exp.Literal.number(max_limit))
+                    limit_injected = True
+                    original_limit = None
+                else:
+                    try:
+                        fetch_count = int(count_node.this)
+                    except (ValueError, TypeError, AttributeError):
+                        fetch_count = None
+
+                    if fetch_count is not None and fetch_count > max_limit:
+                        lim.set("count", exp.Literal.number(max_limit))
+                        limit_injected = True
+                        original_limit = fetch_count
+            else:
+                # FETCH FIRST ROWS ONLY without count defaults to 1 row (no clamping needed)
+                pass
         else:
             expr = lim.expression
             numeric_limit: int | None = None
             if expr is not None:
-                if isinstance(expr, exp.Var) and expr.name.upper() == "ALL":
+                if isinstance(expr, exp.Null):
+                    target.limit(max_limit, copy=False)
+                    limit_injected = True
+                    original_limit = None
+                elif isinstance(expr, exp.Var) and expr.name.upper() == "ALL":
                     target.limit(max_limit, copy=False)
                     limit_injected = True
                     original_limit = None

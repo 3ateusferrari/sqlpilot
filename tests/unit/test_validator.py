@@ -501,3 +501,77 @@ def test_limit_on_cte_preserves_internal_limit() -> None:
     assert res3.transformed_sql is not None
     assert "LIMIT 5" in res3.transformed_sql
     assert "LIMIT 100" not in res3.transformed_sql
+
+
+def test_scalar_subquery_in_select_not_scalar_aggregation() -> None:
+    """Subquery in SELECT clause must not classify outer query as scalar aggregation."""
+    sql = "SELECT (SELECT count(*) FROM track) FROM artist"
+    result = validate_and_transform_sql(sql, valid_tables=VALID_TABLES)
+
+    assert result.is_valid is True
+    assert result.limit_injected is True
+    assert result.original_limit is None
+    assert result.transformed_sql is not None
+    assert "LIMIT 100" in result.transformed_sql
+    assert sorted(result.tables_referenced) == ["artist", "track"]
+
+
+def test_limit_all_clamped_to_max() -> None:
+    """SELECT with LIMIT ALL should clamp to max_limit (1000)."""
+    sql = "SELECT * FROM track LIMIT ALL"
+    result = validate_and_transform_sql(sql, valid_tables=VALID_TABLES)
+
+    assert result.is_valid is True
+    assert result.limit_injected is True
+    assert result.original_limit is None
+    assert result.transformed_sql is not None
+    assert "LIMIT 1000" in result.transformed_sql
+
+
+def test_limit_null_clamped_to_max() -> None:
+    """SELECT with LIMIT NULL should clamp to max_limit (1000)."""
+    sql = "SELECT * FROM track LIMIT NULL"
+    result = validate_and_transform_sql(sql, valid_tables=VALID_TABLES)
+
+    assert result.is_valid is True
+    assert result.limit_injected is True
+    assert result.original_limit is None
+    assert result.transformed_sql is not None
+    assert "LIMIT 1000" in result.transformed_sql
+
+
+def test_fetch_first_clamping_and_preservation() -> None:
+    """FETCH FIRST should clamp count when exceeding max_limit and preserve when under."""
+    # Clamping case: 5000 -> 1000
+    sql1 = "SELECT * FROM track FETCH FIRST 5000 ROWS ONLY"
+    res1 = validate_and_transform_sql(sql1, valid_tables=VALID_TABLES)
+    assert res1.is_valid is True
+    assert res1.limit_injected is True
+    assert res1.original_limit == 5000
+    assert res1.transformed_sql is not None
+    assert "1000" in res1.transformed_sql
+    assert "5000" not in res1.transformed_sql
+
+    # Preservation case: 10 <= 1000
+    sql2 = "SELECT * FROM track FETCH FIRST 10 ROWS ONLY"
+    res2 = validate_and_transform_sql(sql2, valid_tables=VALID_TABLES)
+    assert res2.is_valid is True
+    assert res2.limit_injected is False
+    assert res2.original_limit is None
+    assert res2.transformed_sql is not None
+    assert "10" in res2.transformed_sql
+
+
+def test_effective_default_normalization() -> None:
+    """default_limit higher than max_limit must be clamped to max_limit."""
+    sql = "SELECT * FROM track"
+    result = validate_and_transform_sql(
+        sql,
+        valid_tables=VALID_TABLES,
+        default_limit=2000,
+        max_limit=500,
+    )
+    assert result.is_valid is True
+    assert result.limit_injected is True
+    assert result.transformed_sql is not None
+    assert "LIMIT 500" in result.transformed_sql
