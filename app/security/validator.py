@@ -71,12 +71,14 @@ FORBIDDEN_SCHEMAS: frozenset[str] = frozenset(
 
 
 class ValidationResult(BaseModel):
-    """Validation result containing status, errors, and transformed SQL."""
+    """Validation result containing status, errors, transformed SQL, and limit metadata."""
 
     is_valid: bool
     errors: list[str] = Field(default_factory=list)
     transformed_sql: str | None = None
     tables_referenced: list[str] = Field(default_factory=list)
+    limit_injected: bool = False
+    original_limit: int | None = None
 
 
 def _is_select_tree(node: sqlglot.Expr) -> bool:
@@ -91,6 +93,35 @@ def _is_select_tree(node: sqlglot.Expr) -> bool:
             return _is_select_tree(left) and _is_select_tree(right)
         return False
     return False
+
+
+def _is_aggregate_expression(expr: sqlglot.Expr) -> bool:
+    """Check if an expression is an aggregate function or wrapped aggregate."""
+    unaliased = expr.unalias()
+    if unaliased.find(exp.Window) is not None:
+        return False
+    if isinstance(unaliased, exp.AggFunc):
+        return True
+    agg_funcs = list(unaliased.find_all(exp.AggFunc))
+    if not agg_funcs:
+        return False
+    # If it contains an aggregate function, ensure all column references are within an aggregate
+    for col in unaliased.find_all(exp.Column):
+        if col.find_ancestor(exp.AggFunc) is None:
+            return False
+    return True
+
+
+def _is_pure_scalar_aggregation(node: sqlglot.Expr) -> bool:
+    """Check if node is a pure scalar aggregation without GROUP BY."""
+    if not isinstance(node, exp.Select):
+        return False
+    if node.args.get("group") is not None:
+        return False
+    selects = node.selects
+    if not selects:
+        return False
+    return all(_is_aggregate_expression(s) for s in selects)
 
 
 def _extract_function_name(func_node: exp.Func | exp.Anonymous) -> str:
@@ -135,16 +166,19 @@ def validate_and_transform_sql(
     sql: str,
     valid_tables: Iterable[str],
     default_limit: int = 100,
+    max_limit: int = 1000,
 ) -> ValidationResult:
-    """Validate SQL query via AST for read-only safety, table conformance and single statement.
+    """Validate SQL query via AST for read-only safety, table conformance, and limit enforcement.
 
     Args:
         sql: Raw SQL query string to validate.
         valid_tables: Whitelisted physical table names (case-insensitive).
-        default_limit: Default LIMIT for query transformation (reserved for ISSUE-06).
+        default_limit: Default LIMIT injected when query has no LIMIT clause.
+        max_limit: Maximum allowed LIMIT value before clamping.
 
     Returns:
-        ValidationResult indicating validity, errors, transformed SQL, and referenced tables.
+        ValidationResult indicating validity, errors, transformed SQL, referenced tables,
+        and limit injection metadata.
     """
     if not sql or not sql.strip():
         return ValidationResult(
@@ -245,10 +279,43 @@ def validate_and_transform_sql(
             tables_referenced=sorted_tables,
         )
 
+    # 6. Automatic LIMIT injection and clamping on root statement
+    target = ast.unnest() if hasattr(ast, "unnest") else ast
+    is_scalar_agg = _is_pure_scalar_aggregation(target)
+    limit_injected = False
+    original_limit: int | None = None
+
+    if hasattr(target, "limit"):
+        lim = target.args.get("limit")
+        if lim is None:
+            if not is_scalar_agg:
+                target.limit(default_limit, copy=False)
+                limit_injected = True
+        else:
+            expr = lim.expression
+            numeric_limit: int | None = None
+            if expr is not None:
+                if isinstance(expr, exp.Var) and expr.name.upper() == "ALL":
+                    target.limit(max_limit, copy=False)
+                    limit_injected = True
+                    original_limit = None
+                else:
+                    try:
+                        numeric_limit = int(expr.this)
+                    except (ValueError, TypeError, AttributeError):
+                        numeric_limit = None
+
+                    if numeric_limit is not None and numeric_limit > max_limit:
+                        target.limit(max_limit, copy=False)
+                        limit_injected = True
+                        original_limit = numeric_limit
+
     transpiled_sql = ast.sql(dialect="postgres")
     return ValidationResult(
         is_valid=True,
         errors=[],
         transformed_sql=transpiled_sql,
         tables_referenced=sorted_tables,
+        limit_injected=limit_injected,
+        original_limit=original_limit,
     )

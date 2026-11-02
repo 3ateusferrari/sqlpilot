@@ -346,3 +346,158 @@ def test_case_insensitivity_and_quoting() -> None:
     sql2 = "SELECT PG_SLEEP(5)"
     res2 = validate_and_transform_sql(sql2, valid_tables=VALID_TABLES)
     assert res2.is_valid is False
+
+
+def test_limit_injection_simple_select() -> None:
+    """SELECT without LIMIT should have default LIMIT injected."""
+    sql = "SELECT * FROM track"
+    result = validate_and_transform_sql(sql, valid_tables=VALID_TABLES)
+
+    assert result.is_valid is True
+    assert result.limit_injected is True
+    assert result.original_limit is None
+    assert result.transformed_sql is not None
+    assert "LIMIT 100" in result.transformed_sql
+
+
+def test_limit_preservation_under_max() -> None:
+    """SELECT with LIMIT <= max_limit should preserve original LIMIT."""
+    sql = "SELECT * FROM track LIMIT 10"
+    result = validate_and_transform_sql(sql, valid_tables=VALID_TABLES)
+
+    assert result.is_valid is True
+    assert result.limit_injected is False
+    assert result.original_limit is None
+    assert result.transformed_sql is not None
+    assert "LIMIT 10" in result.transformed_sql
+
+
+def test_limit_clamping_over_max() -> None:
+    """SELECT with LIMIT > max_limit should be clamped to max_limit."""
+    sql = "SELECT * FROM track LIMIT 5000"
+    result = validate_and_transform_sql(sql, valid_tables=VALID_TABLES)
+
+    assert result.is_valid is True
+    assert result.limit_injected is True
+    assert result.original_limit == 5000
+    assert result.transformed_sql is not None
+    assert "LIMIT 1000" in result.transformed_sql
+
+
+def test_limit_custom_parameters() -> None:
+    """Custom default_limit and max_limit parameters should be respected."""
+    # Custom default_limit
+    sql1 = "SELECT * FROM track"
+    res1 = validate_and_transform_sql(sql1, valid_tables=VALID_TABLES, default_limit=50)
+    assert res1.is_valid is True
+    assert res1.limit_injected is True
+    assert "LIMIT 50" in (res1.transformed_sql or "")
+
+    # Custom max_limit clamping
+    sql2 = "SELECT * FROM track LIMIT 500"
+    res2 = validate_and_transform_sql(sql2, valid_tables=VALID_TABLES, max_limit=250)
+    assert res2.is_valid is True
+    assert res2.limit_injected is True
+    assert res2.original_limit == 500
+    assert "LIMIT 250" in (res2.transformed_sql or "")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT count(*) FROM track",
+        "SELECT sum(total), avg(unit_price) FROM invoice_line",
+        "SELECT coalesce(sum(total), 0) FROM invoice",
+        "SELECT min(unit_price), max(unit_price) FROM invoice_line",
+    ],
+)
+def test_no_limit_on_pure_scalar_aggregations(sql: str) -> None:
+    """Pure scalar aggregations without GROUP BY must not have LIMIT injected."""
+    result = validate_and_transform_sql(sql, valid_tables=VALID_TABLES)
+
+    assert result.is_valid is True
+    assert result.limit_injected is False
+    assert result.original_limit is None
+    assert result.transformed_sql is not None
+    assert "LIMIT" not in result.transformed_sql.upper()
+
+
+def test_limit_injected_with_group_by() -> None:
+    """Queries with aggregations AND GROUP BY must have LIMIT injected."""
+    sql = "SELECT customer_id, count(*) FROM invoice GROUP BY customer_id"
+    result = validate_and_transform_sql(sql, valid_tables=VALID_TABLES)
+
+    assert result.is_valid is True
+    assert result.limit_injected is True
+    assert result.original_limit is None
+    assert result.transformed_sql is not None
+    assert "LIMIT 100" in result.transformed_sql
+
+
+def test_limit_injected_on_union() -> None:
+    """UNION queries without LIMIT must have LIMIT injected on root."""
+    sql = "SELECT name FROM artist UNION SELECT title FROM album"
+    result = validate_and_transform_sql(sql, valid_tables=VALID_TABLES)
+
+    assert result.is_valid is True
+    assert result.limit_injected is True
+    assert result.original_limit is None
+    assert result.transformed_sql is not None
+    assert "LIMIT 100" in result.transformed_sql
+
+
+def test_limit_on_cte_preserves_internal_limit() -> None:
+    """CTEs should preserve inner limits while enforcing limit on main statement."""
+    # Case 1: Main query has no LIMIT -> gains LIMIT 100, CTE retains LIMIT 5
+    sql1 = """
+        WITH top_artists AS (
+            SELECT artist_id, COUNT(*) AS album_count
+            FROM album
+            GROUP BY artist_id
+            LIMIT 5
+        )
+        SELECT * FROM top_artists
+    """
+    res1 = validate_and_transform_sql(sql1, valid_tables=VALID_TABLES)
+    assert res1.is_valid is True
+    assert res1.limit_injected is True
+    assert res1.original_limit is None
+    assert res1.transformed_sql is not None
+    assert "LIMIT 5" in res1.transformed_sql
+    assert "LIMIT 100" in res1.transformed_sql
+
+    # Case 2: Main query has LIMIT 5000 -> clamped to 1000, CTE retains LIMIT 5
+    sql2 = """
+        WITH top_artists AS (
+            SELECT artist_id, COUNT(*) AS album_count
+            FROM album
+            GROUP BY artist_id
+            LIMIT 5
+        )
+        SELECT * FROM top_artists LIMIT 5000
+    """
+    res2 = validate_and_transform_sql(sql2, valid_tables=VALID_TABLES)
+    assert res2.is_valid is True
+    assert res2.limit_injected is True
+    assert res2.original_limit == 5000
+    assert res2.transformed_sql is not None
+    assert "LIMIT 5" in res2.transformed_sql
+    assert "LIMIT 1000" in res2.transformed_sql
+
+    # Case 3: Main query is pure scalar aggregation -> no limit on main, CTE retains LIMIT 5
+    sql3 = """
+        WITH top_artists AS (
+            SELECT artist_id, COUNT(*) AS album_count
+            FROM album
+            GROUP BY artist_id
+            LIMIT 5
+        )
+        SELECT count(*) FROM top_artists
+    """
+    res3 = validate_and_transform_sql(sql3, valid_tables=VALID_TABLES)
+    assert res3.is_valid is True
+    assert res3.limit_injected is False
+    assert res3.original_limit is None
+    assert res3.transformed_sql is not None
+    assert "LIMIT 5" in res3.transformed_sql
+    assert "LIMIT 100" not in res3.transformed_sql
