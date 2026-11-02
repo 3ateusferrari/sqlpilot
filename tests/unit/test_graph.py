@@ -200,7 +200,8 @@ async def test_gerar_sql_node_cleans_markdown_and_handles_none() -> None:
         update = await gerar_sql_node(state)
 
     assert update["sql_gerado"] == "SELECT * FROM artist LIMIT 5;"
-    assert update["sql_final"] == "SELECT * FROM artist LIMIT 5;"
+    assert update["raciocinio_sql"] == "Busca 5 artistas com bloco markdown."
+    assert "sql_final" not in update
 
     # Test None response from LLM
     mock_runnable.ainvoke = AsyncMock(return_value=None)
@@ -287,6 +288,22 @@ async def test_executar_sql_node_no_description_query() -> None:
 
 
 @pytest.mark.asyncio
+async def test_executar_sql_node_rejects_missing_validated_sql() -> None:
+    """Verify executar_sql_node refuses to execute when sql_final is missing or unvalidated."""
+    # Only sql_gerado present, no sql_final
+    state_only_gerado: AgentState = {"sql_gerado": "SELECT * FROM artist;"}
+    update = await executar_sql_node(state_only_gerado)
+    assert update["resultado"] == []
+    assert "Nenhuma query SQL validada disponível" in (update["erro_execucao"] or "")
+
+    # sql_final empty string
+    state_empty_final: AgentState = {"sql_final": "", "sql_gerado": "SELECT 1;"}
+    update_empty = await executar_sql_node(state_empty_final)
+    assert update_empty["resultado"] == []
+    assert "Nenhuma query SQL validada disponível" in (update_empty["erro_execucao"] or "")
+
+
+@pytest.mark.asyncio
 async def test_gerar_sql_node_retry_prompt_injection() -> None:
     """Verify gerar_sql_node injects retry context when erros_validacao exists in state."""
     mock_llm = MagicMock()
@@ -358,6 +375,7 @@ async def test_validar_sql_node_failure_increments_attempts() -> None:
     assert update["tentativas"] == 2
     assert len(update["erros_validacao"]) > 0
     assert "tabela_inexistente" in update["erros_validacao"][0]
+    assert update["sql_final"] == ""
 
 
 def test_route_after_validation() -> None:

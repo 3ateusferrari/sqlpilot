@@ -59,7 +59,7 @@ async def test_gerar_sql_node_invokes_structured_output() -> None:
 
     assert update["sql_gerado"] == mock_output.sql
     assert update["raciocinio_sql"] == mock_output.reasoning
-    assert update["sql_final"] == mock_output.sql
+    assert "sql_final" not in update
 
 
 @pytest.mark.asyncio

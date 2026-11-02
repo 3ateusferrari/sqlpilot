@@ -109,7 +109,6 @@ async def gerar_sql_node(state: AgentState) -> dict[str, Any]:
     return {
         "sql_gerado": sql,
         "raciocinio_sql": reasoning,
-        "sql_final": sql,
     }
 
 
@@ -119,8 +118,8 @@ async def validar_sql_node(state: AgentState) -> dict[str, Any]:
     Enforces read-only SELECT instructions, valid tables whitelist, and automatic
     LIMIT clamping/injection.
     """
-    sql = state.get("sql_gerado", "")
-    valid_tables = state.get("valid_tables", [])
+    sql = state.get("sql_gerado") or ""
+    valid_tables = state.get("valid_tables") or []
     logger.info("validar_sql_node_executing", sql=sql)
 
     res = validate_and_transform_sql(
@@ -142,17 +141,18 @@ async def validar_sql_node(state: AgentState) -> dict[str, Any]:
     return {
         "tentativas": tentativas,
         "erros_validacao": res.errors,
+        "sql_final": "",
     }
 
 
 async def executar_sql_node(state: AgentState) -> dict[str, Any]:
     """Execute SQL query against PostgreSQL readonly connection and capture results."""
-    sql_to_run = state.get("sql_final") or state.get("sql_gerado")
+    sql_to_run = state.get("sql_final")
     if not sql_to_run:
-        logger.warning("executar_sql_node_empty_sql")
+        logger.warning("executar_sql_node_missing_validated_sql")
         return {
             "resultado": [],
-            "erro_execucao": "Nenhuma query SQL fornecida para execução.",
+            "erro_execucao": "Nenhuma query SQL validada disponível para execução.",
         }
 
     logger.info("executar_sql_node_executing", sql=sql_to_run)

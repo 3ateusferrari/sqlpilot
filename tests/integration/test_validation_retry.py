@@ -125,8 +125,9 @@ async def test_validation_retry_exhausted_retries() -> None:
         "Múltiplos statements" in err or "Drop" in err for err in final_state["erros_validacao"]
     )
 
-    # 3. Database execution never ran
+    # 3. Database execution never ran and sql_final was not validated
     assert final_state.get("resultado") is None or final_state.get("resultado") == []
+    assert final_state.get("sql_final") in ("", None)
 
     # 4. Response explains the validation failure
     assert "validação" in final_state["resposta"].lower()

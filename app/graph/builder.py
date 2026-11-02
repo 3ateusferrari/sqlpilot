@@ -14,7 +14,7 @@ from app.graph.nodes import (
 from app.graph.state import AgentState
 
 
-def build_linear_graph() -> CompiledStateGraph:
+def build_graph() -> CompiledStateGraph:
     """Build and compile the SQLPilot StateGraph with AST validation and retry loop.
 
     The execution flow is:
@@ -55,4 +55,4 @@ def build_linear_graph() -> CompiledStateGraph:
     return workflow.compile()
 
 
-build_graph = build_linear_graph
+build_linear_graph = build_graph
