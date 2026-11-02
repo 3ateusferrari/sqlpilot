@@ -9,6 +9,7 @@ from uuid import UUID
 from langchain_core.messages import HumanMessage, SystemMessage
 from psycopg.rows import dict_row
 
+from app.config import settings
 from app.db.schema_loader import load_schema
 from app.db.session import get_readonly_connection
 from app.graph.llm import get_llm
@@ -20,7 +21,7 @@ logger = get_logger(__name__)
 
 
 def _serialize_value(val: Any) -> Any:
-    """Serialize non-JSON types (Decimal, datetime, date, UUID, bytes) to JSON-safe primitives."""
+    """Serialize non-JSON types (Decimal, datetime, date, UUID, bytes, set, tuple) to JSON-safe primitives."""
     if isinstance(val, Decimal):
         return float(val)
     if isinstance(val, (datetime, date, time)):
@@ -29,11 +30,23 @@ def _serialize_value(val: Any) -> Any:
         return str(val)
     if isinstance(val, (bytes, bytearray)):
         return val.decode("utf-8", errors="replace")
-    if isinstance(val, list):
+    if isinstance(val, (list, tuple, set)):
         return [_serialize_value(item) for item in val]
     if isinstance(val, dict):
         return {k: _serialize_value(v) for k, v in val.items()}
     return val
+
+
+def _clean_sql_markdown(sql: str) -> str:
+    """Strip markdown code fence blocks (```sql ... ```) if present."""
+    sql = sql.strip()
+    if sql.startswith("```"):
+        lines = sql.splitlines()
+        if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].startswith("```"):
+            sql = "\n".join(lines[1:-1]).strip()
+        else:
+            sql = sql.removeprefix("```sql").removeprefix("```").removesuffix("```").strip()
+    return sql
 
 
 async def carregar_schema_node(state: AgentState) -> dict[str, Any]:
@@ -65,7 +78,10 @@ async def gerar_sql_node(state: AgentState) -> dict[str, Any]:
     structured_llm = llm.with_structured_output(GeneratedSQL)
     res = await structured_llm.ainvoke(messages)
 
-    if isinstance(res, GeneratedSQL):
+    if res is None:
+        sql = ""
+        reasoning = ""
+    elif isinstance(res, GeneratedSQL):
         sql = res.sql
         reasoning = res.reasoning
     elif isinstance(res, dict):
@@ -74,6 +90,8 @@ async def gerar_sql_node(state: AgentState) -> dict[str, Any]:
     else:
         sql = getattr(res, "sql", str(res))
         reasoning = getattr(res, "reasoning", "")
+
+    sql = _clean_sql_markdown(sql)
 
     logger.info("gerar_sql_node_completed", sql=sql)
     return {
@@ -99,7 +117,10 @@ async def executar_sql_node(state: AgentState) -> dict[str, Any]:
         async with get_readonly_connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(sql_to_run)
-                raw_rows = await cur.fetchall()
+                if cur.description:
+                    raw_rows = await cur.fetchall()
+                else:
+                    raw_rows = []
 
         serialized_rows = [{k: _serialize_value(v) for k, v in row.items()} for row in raw_rows]
         logger.info("executar_sql_node_success", row_count=len(serialized_rows))
@@ -133,9 +154,19 @@ async def responder_em_linguagem_natural_node(state: AgentState) -> dict[str, An
 
     logger.info("responder_em_linguagem_natural_synthesizing", result_count=len(resultado))
 
+    limit = settings.default_row_limit
+    if len(resultado) > limit:
+        resultado_to_send = resultado[:limit]
+        truncation_notice = f"\n(Nota: Exibindo apenas os primeiros {limit} de {len(resultado)} registros retornados.)"
+    else:
+        resultado_to_send = resultado
+        truncation_notice = ""
+
     prompt_user = (
         f"Pergunta original do usuário:\n{pergunta}\n\n"
-        f"Dados retornados da consulta SQL:\n{json.dumps(resultado, ensure_ascii=False, indent=2)}"
+        f"Dados retornados da consulta SQL:\n"
+        f"{json.dumps(resultado_to_send, ensure_ascii=False, indent=2)}"
+        f"{truncation_notice}"
     )
 
     messages = [
@@ -145,6 +176,18 @@ async def responder_em_linguagem_natural_node(state: AgentState) -> dict[str, An
 
     llm = get_llm()
     ai_msg = await llm.ainvoke(messages)
-    resposta = ai_msg.content if isinstance(ai_msg.content, str) else str(ai_msg.content)
+
+    if isinstance(ai_msg.content, str):
+        resposta = ai_msg.content
+    elif isinstance(ai_msg.content, list):
+        text_parts = [
+            block["text"]
+            if isinstance(block, dict) and "text" in block
+            else getattr(block, "text", str(block))
+            for block in ai_msg.content
+        ]
+        resposta = "".join(text_parts) if text_parts else str(ai_msg.content)
+    else:
+        resposta = str(ai_msg.content)
 
     return {"resposta": resposta}
