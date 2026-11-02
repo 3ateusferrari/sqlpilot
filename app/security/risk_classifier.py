@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
-from typing import Self
+import json
+from typing import Any, Self
 
+import psycopg.sql
 import sqlglot
+from psycopg import AsyncConnection
 from pydantic import BaseModel, Field, model_validator
 from sqlglot import exp
 
-from app.graph.state import RiskLevel
+from app.config import settings
+from app.db.session import get_readonly_connection
+from app.graph.state import ExplainMetrics, RiskLevel
+from app.logging import get_logger
 from app.security.validator import _is_pure_scalar_aggregation, _resolve_physical_tables
+
+logger = get_logger(__name__)
 
 SENSITIVE_TABLES: frozenset[str] = frozenset({"employee", "customer", "invoice"})
 PII_COLUMNS: frozenset[str] = frozenset({"email", "phone", "address", "birth_date", "postal_code"})
@@ -247,3 +255,104 @@ def analyze_ast_risk(sql: str) -> DeterministicRiskResult:
         nivel_risco=level,
         motivos_risco=deduped_reasons,
     )
+
+
+def _has_seq_scan(node: dict[str, Any]) -> bool:
+    """Recursively check if any node in the explain plan is a Seq Scan."""
+    if node.get("Node Type") == "Seq Scan":
+        return True
+    for child in node.get("Plans", []):
+        if isinstance(child, dict) and _has_seq_scan(child):
+            return True
+    return False
+
+
+async def _run_explain(conn: AsyncConnection[Any], sql: str) -> ExplainMetrics:
+    """Execute EXPLAIN (FORMAT JSON) query on the provided connection."""
+    explain_query = psycopg.sql.SQL("EXPLAIN (FORMAT JSON) {}").format(psycopg.sql.SQL(sql))
+    async with conn.cursor() as cur:
+        await cur.execute(explain_query)
+        row = await cur.fetchone()
+        if not row or row[0] is None:
+            return ExplainMetrics()
+
+        raw_data = row[0]
+        if isinstance(raw_data, str):
+            raw_data = json.loads(raw_data)
+
+        plan: dict[str, Any] = {}
+        if isinstance(raw_data, list) and raw_data:
+            first = raw_data[0]
+            if isinstance(first, dict):
+                plan = first.get("Plan", first)
+        elif isinstance(raw_data, dict):
+            plan = raw_data.get("Plan", raw_data)
+
+        total_cost: float = float(plan.get("Total Cost", 0.0))
+        estimated_rows: int = int(plan.get("Plan Rows", 0))
+        has_seq_scan: bool = _has_seq_scan(plan)
+
+        return ExplainMetrics(
+            estimated_rows=estimated_rows,
+            total_cost=total_cost,
+            has_seq_scan=has_seq_scan,
+            raw_plan=plan,
+        )
+
+
+async def analyze_explain_plan(
+    sql: str,
+    conn: AsyncConnection[Any] | None = None,
+) -> ExplainMetrics:
+    """Analyze query execution cost and cardinality using EXPLAIN (FORMAT JSON).
+
+    Args:
+        sql: SQL query to analyze.
+        conn: Optional active database connection (uses readonly connection if None).
+
+    Returns:
+        ExplainMetrics with total cost, estimated rows, Seq Scan flag, and raw plan.
+    """
+    try:
+        if conn is None:
+            async with get_readonly_connection() as readonly_conn:
+                return await _run_explain(readonly_conn, sql)
+        return await _run_explain(conn, sql)
+    except Exception as err:
+        logger.warning("explain_plan_failed", error=str(err))
+        return ExplainMetrics()
+
+
+def evaluate_explain_risk(
+    metrics: ExplainMetrics,
+    cost_threshold: float | None = None,
+    rows_threshold: int | None = None,
+) -> tuple[RiskLevel, list[str]]:
+    """Evaluate execution risk based on EXPLAIN plan metrics against thresholds.
+
+    Args:
+        metrics: Plan metrics containing cost and estimated rows.
+        cost_threshold: Maximum tolerated total cost (defaults to settings.explain_cost_threshold).
+        rows_threshold: Maximum tolerated row count (defaults to settings.explain_rows_threshold).
+
+    Returns:
+        Tuple of (RiskLevel, list of reasons).
+    """
+    if cost_threshold is None:
+        cost_threshold = settings.explain_cost_threshold
+    if rows_threshold is None:
+        rows_threshold = settings.explain_rows_threshold
+
+    reasons: list[str] = []
+    if metrics.total_cost > cost_threshold:
+        reasons.append(
+            f"Custo estimado do plano de execução ({metrics.total_cost:.1f}) excede o limite tolerado ({cost_threshold:.1f})"
+        )
+    if metrics.estimated_rows > rows_threshold:
+        reasons.append(
+            f"Cardinalidade estimada ({metrics.estimated_rows} linhas) excede o limite tolerado ({rows_threshold} linhas)"
+        )
+
+    if reasons:
+        return ("high", reasons)
+    return ("low", [])

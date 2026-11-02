@@ -7,6 +7,8 @@ from app.security.risk_classifier import (
     DeterministicRiskResult,
     RiskAssessment,
     analyze_ast_risk,
+    analyze_explain_plan,
+    evaluate_explain_risk,
 )
 from app.security.validator import (
     ALLOWED_SCHEMAS,
@@ -29,5 +31,7 @@ __all__ = [
     "SENSITIVE_TABLES",
     "ValidationResult",
     "analyze_ast_risk",
+    "analyze_explain_plan",
+    "evaluate_explain_risk",
     "validate_and_transform_sql",
 ]
